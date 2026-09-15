@@ -1,0 +1,9 @@
+.env
+state/
+logs/
+venv/
+__pycache__/
+*.pyc
+.claude/
+.DS_Store
+screenshots/

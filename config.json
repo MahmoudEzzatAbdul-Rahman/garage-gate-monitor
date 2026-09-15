@@ -1,0 +1,14 @@
+{
+  "roi": {
+    "x": 0,
+    "y": 263,
+    "w": 115,
+    "h": 130
+  },
+  "poll_interval_seconds": 20,
+  "snapshot_timeout_seconds": 10,
+  "diff_threshold": 0.08,
+  "consecutive_required": 3,
+  "open_alert_minutes": 5,
+  "reminder_cooldown_hours": 3
+}
