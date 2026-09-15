@@ -33,6 +33,7 @@ STATE_DIR = os.path.join(BASE_DIR, "state")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
 BASELINE_PATH = os.path.join(STATE_DIR, "baseline.jpg")
+OPEN_BASELINE_PATH = os.path.join(STATE_DIR, "open_baseline.jpg")
 LAST_SNAPSHOT_PATH = os.path.join(STATE_DIR, "last_snapshot.jpg")
 
 log = logging.getLogger("gate_monitor")
@@ -97,6 +98,7 @@ def default_state() -> dict:
         "open_since": None,
         "consecutive_diverged_count": 0,
         "consecutive_matched_count": 0,
+        "consecutive_open_diverged_count": 0,
         "last_alert_sent_at": None,
         "baseline_updated_at": None,
         "last_checked_at": None,
@@ -107,7 +109,14 @@ def load_state() -> dict:
     if not os.path.exists(STATE_PATH):
         return default_state()
     with open(STATE_PATH) as f:
-        return json.load(f)
+        state = json.load(f)
+    state.setdefault("consecutive_open_diverged_count", 0)  # older state.json files predate this field
+    return state
+
+
+def clear_open_baseline() -> None:
+    if os.path.exists(OPEN_BASELINE_PATH):
+        os.remove(OPEN_BASELINE_PATH)
 
 
 def save_state_atomic(state: dict) -> None:
@@ -229,6 +238,8 @@ def tick(config: dict, env: dict, state: dict) -> dict:
         if state["consecutive_diverged_count"] >= required:
             state["status"] = "open"
             state["open_since"] = now
+            state["consecutive_open_diverged_count"] = 0
+            clear_open_baseline()  # defensive: guarantee a clean slate for this open episode
             log.info(f"Gate OPENED (diff score {score:.3f})")
         elif is_match:
             crop.save(BASELINE_PATH)
@@ -240,12 +251,50 @@ def tick(config: dict, env: dict, state: dict) -> dict:
             state["status"] = "closed"
             state["open_since"] = None
             state["last_alert_sent_at"] = None
+            state["consecutive_open_diverged_count"] = 0
+            clear_open_baseline()
             crop.save(BASELINE_PATH)
             state["baseline_updated_at"] = now
-            log.info("Gate CLOSED")
+            log.info("Gate CLOSED (matched original pre-open baseline)")
         else:
             open_since = parse_iso(state["open_since"])
             open_minutes = (datetime.now(timezone.utc) - open_since).total_seconds() / 60.0
+
+            # Once past the alert threshold, the original pre-open baseline can be
+            # stale (lighting may have drifted during a long open episode) and might
+            # never match again. Track a second, self-calibrating "open" baseline in
+            # parallel — if the view ever diverges from *that*, something changed
+            # (almost certainly the gate closing), so treat it as closed and start
+            # a fresh slate rather than waiting on a match against the stale original.
+            if open_minutes >= config["open_alert_minutes"]:
+                if os.path.exists(OPEN_BASELINE_PATH):
+                    open_baseline = Image.open(OPEN_BASELINE_PATH)
+                    open_score = compute_diff(crop, open_baseline)
+                    open_is_match = open_score <= config["diff_threshold"]
+                    log.debug(
+                        f"Open-baseline diff score {open_score:.4f} -> "
+                        f"{'MATCH (still open, same look)' if open_is_match else 'DIVERGED (view changed)'}"
+                    )
+                    if open_is_match:
+                        state["consecutive_open_diverged_count"] = 0
+                        crop.save(OPEN_BASELINE_PATH)
+                    else:
+                        state["consecutive_open_diverged_count"] += 1
+                        if state["consecutive_open_diverged_count"] >= required:
+                            log.info(
+                                "View diverged from the open-state baseline — assuming "
+                                "the gate has closed and starting a fresh slate."
+                            )
+                            state = default_state()
+                            state["baseline_updated_at"] = now
+                            state["last_checked_at"] = now
+                            crop.save(BASELINE_PATH)
+                            clear_open_baseline()
+                            save_state_atomic(state)
+                            return state
+                else:
+                    crop.save(OPEN_BASELINE_PATH)
+                    log.debug("Open-state baseline established for this episode.")
 
             due_for_first_alert = (
                 state["last_alert_sent_at"] is None
