@@ -7,8 +7,8 @@
   },
   "poll_interval_seconds": 20,
   "snapshot_timeout_seconds": 10,
-  "diff_threshold": 0.095,
+  "diff_threshold": 0.14,
   "consecutive_required": 3,
   "open_alert_minutes": 5,
-  "reminder_cooldown_hours": 3
+  "reminder_cooldown_hours": 1
 }
