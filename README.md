@@ -1,8 +1,8 @@
 # Garage Gate Monitor
 
-A small personal prototype that watches a LAN camera feed of a garage gate and
-emails an alert if the gate has been open continuously for longer than a
-configurable threshold (default: 10 minutes).
+A small personal prototype that watches one or two LAN camera feeds of a
+garage gate and emails an alert if the gate has been open continuously for
+longer than a configurable threshold (default: 10 minutes).
 
 No AI/ML model, no cloud dependency — just a periodic snapshot compared
 against a self-updating "last known closed" reference photo.
@@ -10,17 +10,19 @@ against a self-updating "last known closed" reference photo.
 ## How it works (short version)
 
 Every `poll_interval_seconds`, the app:
-1. Grabs one JPEG snapshot from the camera's RTSP stream via `ffmpeg`.
-2. Crops it down to a fixed region of interest (ROI) — the small part of the
-   frame where the gate visibly moves.
-3. Compares that crop to the most recently confirmed-"closed" reference photo
-   (mean pixel difference, grayscale).
-4. If the crop looks different for `consecutive_required` checks in a row, the
-   gate is considered "open" and a stopwatch starts.
+1. Grabs one JPEG snapshot from each configured camera's RTSP stream via
+   `ffmpeg`.
+2. Crops each down to that camera's region of interest (ROI) — the small part
+   of the frame where the gate visibly moves.
+3. Compares each crop to that camera's most recently confirmed-"closed"
+   reference photo (mean pixel difference, grayscale).
+4. A camera "votes open" when its crop looks different for that camera's
+   `consecutive_required` checks in a row. The gate is considered "open" only
+   when **every** camera votes open (both must agree), and a stopwatch starts.
 5. If it's still open after `open_alert_minutes`, an email is sent. If it
    stays open, reminder emails go out every `reminder_cooldown_hours` (not on
    every check).
-6. As soon as the crop matches "closed" again for `consecutive_required`
+6. As soon as every camera matches "closed" again for `consecutive_required`
    checks, it flips back to closed and the cycle resets.
 
 The "closed" reference photo keeps refreshing itself while the gate is
@@ -58,12 +60,17 @@ Now edit `.env` and fill in real values:
 
 ```sh
 RTSP_URL=rtsp://USER:PASSWORD@CAMERA_IP:554/stream1
+RTSP_URL_SECOND=rtsp://USER:PASSWORD@CAMERA_IP:554/stream1
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=465
 SMTP_USER=youraccount@gmail.com
 SMTP_PASSWORD=gmail-app-password-here
 ALERT_RECIPIENT=you@example.com
 ```
+
+Each camera in `config.json` names the `.env` variable holding its RTSP URL —
+add a second line like `RTSP_URL_SECOND=...` pointing at the second camera's
+stream.
 
 `.env` is gitignored and permission-restricted (`chmod 600`) since it holds
 real credentials — never commit it, and never put credentials anywhere else
@@ -73,7 +80,9 @@ real credentials — never commit it, and never put credentials anywhere else
 
 The ROI is a fixed pixel box (`x, y, w, h`) cropped out of every frame — it is
 **not** auto-detected, and it does not update itself if the camera is moved or
-remounted. You determine it once with the calibration helper:
+remounted. You determine it once with the calibration helper (one camera at a
+time — `calibrate.py` reads `RTSP_URL`, so point that at the camera you're
+calibrating, or run it against each camera's URL in turn):
 
 ```sh
 python3 calibrate.py
@@ -89,8 +98,8 @@ python3 calibrate.py --roi x,y,w,h
 This re-grabs a fresh frame, crops exactly that box, and opens both the full
 frame and the crop preview in Preview so you can check alignment. Repeat with
 adjusted numbers until the crop tightly frames the part of the gate that
-visibly moves when it opens, then copy the final `x,y,w,h` into `config.json`'s
-`"roi"` field.
+visibly moves when it opens, then copy the final `x,y,w,h` into that camera's
+`"roi"` field in `config.json`.
 
 **Important — pick a spot away from the hinge.** If the gate is a hinged/swing
 gate (not a sliding gate), a region right next to the hinge/pillar barely
@@ -99,11 +108,12 @@ very little for a given swing angle. Pick the ROI closer to the gate panel's
 outer/leading edge (farther from the hinge), where the same swing produces a
 much bigger, more reliable pixel change.
 
-If you ever change the ROI's `x/y/w/h` in `config.json`, the existing
-`state/baseline.jpg` (saved at the old crop size) becomes stale. The app
-detects the size mismatch automatically and re-bootstraps a fresh baseline —
-but make sure the gate is actually closed at that moment, since whatever
-frame it sees during that reset becomes the new "closed" reference.
+If you ever change a camera's ROI `x/y/w/h` in `config.json`, that camera's
+existing `state/<camera>/baseline.jpg` (saved at the old crop size) becomes
+stale. The app detects the size mismatch automatically and re-bootstraps a
+fresh baseline for that camera — but make sure the gate is actually closed at
+that moment, since whatever frame it sees during that reset becomes the new
+"closed" reference.
 
 ## Running it
 
@@ -123,26 +133,36 @@ decision is logged).
 
 | Key | Meaning |
 |---|---|
-| `roi` | `{x, y, w, h}` pixel box cropped from each frame (see Calibrating above) |
+| `cameras` | Array of camera entries, one per feed (see below) |
 | `poll_interval_seconds` | How often to grab a snapshot and check |
-| `snapshot_timeout_seconds` | How long to wait for `ffmpeg` before giving up on one snapshot (a timeout skips that cycle, never counts as "open") |
-| `diff_threshold` | Grayscale mean-absolute-difference (0–1) above which a frame is considered "changed" |
-| `consecutive_required` | How many consecutive changed/matched reads are needed before flipping state (debounces single noisy frames) |
-| `open_alert_minutes` | How long the gate must be continuously open before the first email fires |
+| `snapshot_timeout_seconds` | How long to wait for `ffmpeg` before giving up on one snapshot (a timeout skips that camera that cycle, never counts as "open") |
+| `open_alert_minutes` | How long the gate must be continuously open (both cameras agreed) before the first email fires |
 | `reminder_cooldown_hours` | How often to re-send a reminder email while still open |
 
-**Current values in `config.json` are fast test values** (`poll_interval_seconds: 10`,
-`open_alert_minutes: 1`) left over from calibration/testing. Before leaving
-this running unattended for real, consider restoring more relaxed production
-values, e.g. `poll_interval_seconds: 20-30`, `open_alert_minutes: 10`.
+Each entry in `cameras`:
+
+| Key | Meaning |
+|---|---|
+| `name` | Short label (also used for the `state/<name>/` folder). Filesystem-safe: A-Z a-z 0-9 `_ . -` |
+| `rtsp_url_env` | `.env` variable name holding this camera's RTSP URL (e.g. `RTSP_URL`, `RTSP_URL_SECOND`) |
+| `roi` | `{x, y, w, h}` pixel box cropped from this camera's frame (see Calibrating above) |
+| `diff_threshold` | Grayscale mean-absolute-difference (0–1) above which this camera's frame is considered "changed" |
+| `consecutive_required` | How many consecutive changed/matched reads this camera needs before flipping state (debounces single noisy frames) |
+
+**Current values in `config.json` are fast test values** (`open_alert_minutes: 0`,
+so the first alert fires as soon as both cameras agree the gate is open, and
+`poll_interval_seconds: 20`). Before leaving this running unattended for real,
+consider restoring more relaxed production values, e.g. `open_alert_minutes: 10`.
 
 ## Known limitations
 
 - **Obstruction false positives.** The algorithm can't distinguish "gate is
-  open" from "something is blocking the camera's view of the ROI" (a parked
+  open" from "something is blocking a camera's view of the ROI" (a parked
   car, a person standing there). A brief obstruction is filtered out by the
-  debounce logic; a sustained one (past `open_alert_minutes`) will trigger a
-  false alert. It self-corrects once the view clears.
+  debounce logic. With two cameras, a sustained obstruction of **one** camera
+  no longer triggers an alert on its own — both must agree — but blocking
+  both cameras (or being a single-camera setup) can still cause a false
+  alert. It self-corrects once the views clear.
 - **Auto-closing gates and short poll windows.** If your gate auto-closes
   quickly (tens of seconds), make sure `poll_interval_seconds` is short enough
   relative to that window, or the app may simply never catch it mid-open
@@ -162,15 +182,17 @@ values, e.g. `poll_interval_seconds: 20-30`, `open_alert_minutes: 10`.
 
 ```
 gate_monitor.py       main loop (run this)
-calibrate.py           one-off ROI calibration helper
+calibrate.py           one-off ROI calibration helper (one camera at a time)
 config.json            non-secret tunables (see table above)
 .env                    credentials (gitignored, chmod 600) — you create this
 .env.example            placeholder template, safe to commit
 requirements.txt        Pillow, numpy, python-dotenv
+test_gate_monitor.py    unittest suite for the two-camera decision logic
 state/
-  baseline.jpg          current "closed" reference crop (self-updating)
-  state.json            persisted state machine (status, timers, counters)
-  last_snapshot.jpg      most recent full-frame grab (debugging aid)
+  state.json            persisted gate state machine (status, timers, counters)
+  <camera>/baseline.jpg          that camera's "closed" reference crop (self-updating)
+  <camera>/open_baseline.jpg     that camera's self-calibrating "open" reference crop
+  <camera>/last_snapshot.jpg     that camera's most recent full-frame grab (debugging aid)
 logs/
   monitor.log           full DEBUG-level log of every poll/decision
 ```

@@ -1,14 +1,32 @@
 {
-  "roi": {
-    "x": 0,
-    "y": 263,
-    "w": 115,
-    "h": 130
-  },
+  "cameras": [
+    {
+      "name": "main",
+      "rtsp_url_env": "RTSP_URL",
+      "roi": {
+        "x": 0,
+        "y": 283,
+        "w": 115,
+        "h": 130
+      },
+      "diff_threshold": 0.1,
+      "consecutive_required": 3
+    },
+    {
+      "name": "second",
+      "rtsp_url_env": "RTSP_URL_SECOND",
+      "roi": {
+        "x": 0,
+        "y": 550,
+        "w": 350,
+        "h": 520
+      },
+      "diff_threshold": 0.05,
+      "consecutive_required": 1
+    }
+  ],
   "poll_interval_seconds": 20,
   "snapshot_timeout_seconds": 10,
-  "diff_threshold": 0.14,
-  "consecutive_required": 3,
-  "open_alert_minutes": 5,
+  "open_alert_minutes": 0,
   "reminder_cooldown_hours": 1
 }
